@@ -208,4 +208,4 @@ def submit_answers():
         }), 500
 if __name__ == '__main__':
     threading.Thread(target=console_listener, daemon=True).start()
-    app.run(port=5000)
+    app.run(host='0.0.0.0', port=5000)
