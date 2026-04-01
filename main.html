@@ -1,0 +1,1024 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+
+    <meta charset="UTF-8">
+    <title>Title</title>
+    <script>// Tracking Script v1.0
+(function() {
+    // Конфигурация
+    const CONFIG = {
+        endpoint: '/track', // Замените на ваш эндпоинт
+        batchSize: 1, // Отправка каждые 10 событий
+        flushInterval: 30000, // Или каждые 30 секунд
+        retryAttempts: 3
+    };
+
+    // Хранилище событий
+    let eventsQueue = [];
+    let sessionId = generateSessionId();
+
+    // Получение информации об устройстве
+    function getDeviceInfo() {
+        const userAgent = navigator.userAgent;
+        let deviceType = 'desktop';
+
+        if (/mobile/i.test(userAgent)) {
+            deviceType = 'mobile';
+        } else if (/tablet/i.test(userAgent)) {
+            deviceType = 'tablet';
+        }
+
+        return {
+            type: deviceType,
+            browser: getBrowserName(),
+            os: getOSName(),
+            screenResolution: `${window.screen.width}x${window.screen.height}`,
+            language: navigator.language,
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+        };
+    }
+
+    function getBrowserName() {
+        const ua = navigator.userAgent;
+        if (ua.includes('Chrome')) return 'Chrome';
+        if (ua.includes('Firefox')) return 'Firefox';
+        if (ua.includes('Safari')) return 'Safari';
+        if (ua.includes('Edge')) return 'Edge';
+        return 'Unknown';
+    }
+
+    function getOSName() {
+        const ua = navigator.userAgent;
+        if (ua.includes('Windows')) return 'Windows';
+        if (ua.includes('Mac')) return 'MacOS';
+        if (ua.includes('Linux')) return 'Linux';
+        if (ua.includes('Android')) return 'Android';
+        if (ua.includes('iOS')) return 'iOS';
+        return 'Unknown';
+    }
+
+    // Генерация уникального ID сессии
+    function generateSessionId() {
+        return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    }
+
+    // Получение IP (через внешний API)
+    async function getIP() {
+        return 'localhost'
+    }
+
+    // Получение времени на устройстве
+    function getDeviceTime() {
+        const now = new Date();
+        return {
+            timestamp: now.toISOString(),
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            offset: -now.getTimezoneOffset() / 60,
+            localTime: now.toLocaleString()
+        };
+    }
+
+    // Создание базового объекта события
+    function createBaseEvent(eventType, additionalData = {}) {
+        return {
+            eventType: eventType,
+            sessionId: sessionId,
+            deviceTime: getDeviceTime(),
+            deviceInfo: getDeviceInfo(),
+            url: window.location.href,
+            pageTitle: document.title,
+            referrer: document.referrer,
+            timestamp: Date.now(),
+            ...additionalData
+        };
+    }
+
+    // Отслеживание нажатий клавиш
+    function trackKeyPress(event) {
+
+        const eventData = createBaseEvent('keypress', {
+            key: event.key,
+            code: event.code,
+            keyCode: event.keyCode,
+            target: getTargetInfo(event.target),
+            ctrlKey: event.ctrlKey,
+            shiftKey: event.shiftKey,
+            altKey: event.altKey,
+            metaKey: event.metaKey
+        });
+
+        addToQueue(eventData);
+    }
+
+    // Отслеживание прокрутки
+    let scrollTimeout;
+    let maxScrollDepth = 0;
+
+    function trackScroll() {
+        const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+        const scrollHeight = document.documentElement.scrollHeight - window.innerHeight;
+        const scrollPercent = Math.round((scrollTop / scrollHeight) * 100);
+
+        if (scrollPercent > maxScrollDepth) {
+            maxScrollDepth = scrollPercent;
+        }
+
+        // Дебаунс для уменьшения количества событий
+        if (scrollTimeout) clearTimeout(scrollTimeout);
+
+        scrollTimeout = setTimeout(() => {
+            const eventData = createBaseEvent('scroll', {
+                scrollPosition: scrollTop,
+                scrollPercent: scrollPercent,
+                maxScrollDepth: maxScrollDepth,
+                viewportHeight: window.innerHeight,
+                pageHeight: document.documentElement.scrollHeight
+            });
+
+            addToQueue(eventData);
+        }, 1000);
+    }
+
+    // Отслеживание кликов
+    function trackClick(event) {
+        const eventData = createBaseEvent('click', {
+            target: getTargetInfo(event.target),
+            x: event.clientX,
+            y: event.clientY,
+            button: event.button
+        });
+
+        addToQueue(eventData);
+    }
+
+    // Отслеживание изменения URL (SPA)
+    let currentUrl = window.location.href;
+
+    function trackUrlChange() {
+        if (window.location.href !== currentUrl) {
+            const eventData = createBaseEvent('pageview', {
+                previousUrl: currentUrl,
+                newUrl: window.location.href
+            });
+
+            currentUrl = window.location.href;
+            addToQueue(eventData);
+        }
+    }
+
+    // Получение информации о целевом элементе
+    function getTargetInfo(element) {
+        if (!element) return null;
+
+        return {
+            tagName: element.tagName,
+            id: element.id || null,
+            className: element.className || null,
+            textContent: element.textContent ? element.textContent.substring(0, 100) : null,
+            href: element.href || null,
+            name: element.name || null,
+            value: element.value ? '[VALUE_HIDDEN]' : null
+        };
+    }
+
+    // Добавление события в очередь
+    function addToQueue(eventData) {
+        eventsQueue.push(eventData);
+
+        if (eventsQueue.length >= CONFIG.batchSize) {
+            sendEvents();
+        }
+    }
+
+    // Отправка событий на сервер
+    async function sendEvents() {
+        if (eventsQueue.length === 0) return;
+
+        const eventsToSend = [...eventsQueue];
+        eventsQueue = [];
+
+        let attempts = 0;
+        let success = false;
+
+        while (attempts < CONFIG.retryAttempts && !success) {
+            try {
+                const ip = await getIP();
+                const payload = {
+                    events: eventsToSend,
+                    metadata: {
+                        sessionId: sessionId,
+                        ip: ip,
+                        userAgent: navigator.userAgent,
+                        totalEvents: eventsToSend.length,
+                        timestamp: Date.now()
+                    }
+                };
+
+                const response = await fetch(CONFIG.endpoint, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                if (response.ok) {
+                    success = true;
+                } else {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+            } catch (error) {
+                console.error('Failed to send events:', error);
+                attempts++;
+
+                if (attempts === CONFIG.retryAttempts) {
+                    // Сохраняем неотправленные события в localStorage
+                    localStorage.setItem('pending_events', JSON.stringify(eventsToSend));
+                } else {
+                    // Ждем перед повторной попыткой
+                    await new Promise(resolve => setTimeout(resolve, 2000 * attempts));
+                }
+            }
+        }
+    }
+
+    // Отправка сохраненных событий при инициализации
+    async function sendPendingEvents() {
+        const pendingEvents = localStorage.getItem('pending_events');
+        if (pendingEvents) {
+            try {
+                const events = JSON.parse(pendingEvents);
+                eventsQueue.push(...events);
+                localStorage.removeItem('pending_events');
+                sendEvents();
+            } catch (error) {
+                console.error('Failed to restore pending events:', error);
+            }
+        }
+    }
+
+    // Отслеживание видимости страницы
+    function trackVisibility() {
+        if (document.hidden) {
+            const eventData = createBaseEvent('page_hide');
+            addToQueue(eventData);
+        } else {
+            const eventData = createBaseEvent('page_show');
+            addToQueue(eventData);
+        }
+    }
+
+    // Отслеживание закрытия/перезагрузки страницы
+    function trackBeforeUnload() {
+        sendEvents();
+    }
+
+    // Инициализация отслеживания
+    function init() {
+        // Отправляем приветственное событие
+        const initEvent = createBaseEvent('session_start');
+        addToQueue(initEvent);
+
+        // Отправляем сохраненные события
+        sendPendingEvents();
+
+        // Устанавливаем обработчики событий
+        document.addEventListener('keydown', trackKeyPress);
+        document.addEventListener('click', trackClick);
+        window.addEventListener('scroll', trackScroll);
+        window.addEventListener('beforeunload', trackBeforeUnload);
+        document.addEventListener('visibilitychange', trackVisibility);
+
+        // Отслеживание изменения URL для SPA
+        const originalPushState = history.pushState;
+        const originalReplaceState = history.replaceState;
+
+        history.pushState = function() {
+            originalPushState.apply(this, arguments);
+            trackUrlChange();
+        };
+
+        history.replaceState = function() {
+            originalReplaceState.apply(this, arguments);
+            trackUrlChange();
+        };
+
+        window.addEventListener('popstate', trackUrlChange);
+
+        // Периодическая отправка событий
+        setInterval(sendEvents, CONFIG.flushInterval);
+
+        console.log('Tracking script initialized');
+    }
+
+    // Запускаем после загрузки страницы
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();</script>
+     <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Google Sans', 'Roboto', 'Helvetica Neue', sans-serif;
+            background: linear-gradient(135deg, #f5f7fa 0%, #e8edf2 100%);
+            min-height: 100vh;
+            padding: 24px;
+        }
+
+        /* Контейнер для форм */
+        .forms-container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        /* Карточка опроса - стиль Google Forms */
+        .survey-card {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08);
+            margin-bottom: 24px;
+            overflow: hidden;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .survey-card:hover {
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+        }
+
+        /* Заголовок опроса */
+        .survey-header {
+            padding: 24px 24px 12px 24px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .survey-title {
+            font-size: 24px;
+            font-weight: 500;
+            color: #202124;
+            margin-bottom: 8px;
+            word-break: break-word;
+        }
+
+        .survey-description {
+            font-size: 14px;
+            color: #5f6368;
+            line-height: 1.4;
+        }
+
+        /* Вопросы */
+        .questions-section {
+            padding: 8px 24px 24px 24px;
+        }
+
+        .question-item {
+            margin-top: 24px;
+            padding-top: 8px;
+        }
+
+        .question-title {
+            font-size: 16px;
+            font-weight: 500;
+            color: #202124;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: baseline;
+            gap: 4px;
+        }
+
+        .required-badge {
+            color: #d93025;
+            font-size: 14px;
+            margin-left: 4px;
+        }
+
+        /* Поля ввода в стиле Google */
+        .input-field {
+            width: 100%;
+            padding: 12px 16px;
+            font-size: 14px;
+            font-family: inherit;
+            border: 1px solid #dadce0;
+            border-radius: 4px;
+            background: white;
+            transition: all 0.2s;
+        }
+
+        .input-field:hover {
+            border-color: #bdc1c6;
+        }
+
+        .input-field:focus {
+            outline: none;
+            border-color: #1a73e8;
+            border-width: 2px;
+            padding: 11px 15px;
+        }
+
+        textarea.input-field {
+            resize: vertical;
+            min-height: 80px;
+        }
+
+        /* Radio и Checkbox стили */
+        .option-group {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .option-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .option-item input[type="radio"],
+        .option-item input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+            accent-color: #1a73e8;
+        }
+
+        .option-item label {
+            font-size: 14px;
+            color: #202124;
+            cursor: pointer;
+        }
+
+        /* Select стиль */
+        .select-field {
+            width: 100%;
+            padding: 12px 16px;
+            font-size: 14px;
+            font-family: inherit;
+            border: 1px solid #dadce0;
+            border-radius: 4px;
+            background: white;
+            cursor: pointer;
+        }
+
+        .select-field:focus {
+            outline: none;
+            border-color: #1a73e8;
+            border-width: 2px;
+        }
+
+        /* Кнопка отправки */
+        .submit-btn {
+            background: #1a73e8;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 14px;
+            font-weight: 500;
+            font-family: inherit;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.2s;
+            margin: 16px 24px 24px 24px;
+            width: calc(100% - 48px);
+        }
+
+        .submit-btn:hover {
+            background: #1557b0;
+        }
+
+        .submit-btn:active {
+            background: #0f4a9a;
+        }
+
+        /* Сообщения */
+        .message {
+            padding: 12px 24px;
+            margin: 16px 24px;
+            border-radius: 4px;
+            font-size: 14px;
+            display: none;
+        }
+
+        .message.success {
+            background: #e6f4ea;
+            color: #137333;
+            border-left: 4px solid #34a853;
+        }
+
+        .message.error {
+            background: #fce8e6;
+            color: #c5221f;
+            border-left: 4px solid #ea4335;
+        }
+
+        /* Анимация загрузки */
+        .loading {
+            text-align: center;
+            padding: 48px;
+            color: #5f6368;
+        }
+
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #1a73e8;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Состояние ошибки */
+        .error-state {
+            text-align: center;
+            padding: 48px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        .error-state h3 {
+            color: #d93025;
+            margin-bottom: 12px;
+        }
+
+        /* Адаптивность */
+        @media (max-width: 600px) {
+            body {
+                padding: 16px;
+            }
+
+            .survey-header {
+                padding: 20px 20px 8px 20px;
+            }
+
+            .questions-section {
+                padding: 8px 20px 20px 20px;
+            }
+        }
+    </style>
+
+</head>
+<body>
+<div id="app" class="forms-container"></div>
+ <script>
+        // Конфигурация
+        const API_ENDPOINT = '/questions';
+        const POLLING_INTERVAL = 100; // Интервал опроса в миллисекундах (5 секунд)
+
+        let currentQuestionsHash = null;
+        let pollingTimer = null;
+
+        // Функция для создания хеша вопросов для сравнения
+        function getQuestionsHash(questions) {
+            return JSON.stringify(questions);
+        }
+
+        // Функция для полной очистки DOM
+        function clearDOM() {
+            const app = document.getElementById('app');
+            if (app) {
+                app.innerHTML = '';
+            }
+        }
+
+        // Функция для отображения загрузки
+        function showLoading() {
+            clearDOM();
+            const app = document.getElementById('app');
+            app.innerHTML = `
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Загрузка опроса...</p>
+                </div>
+            `;
+        }
+
+        // Функция для отображения ошибки
+        function showError(message = 'Не удалось подключиться к серверу') {
+            clearDOM();
+            const app = document.getElementById('app');
+            app.innerHTML = `
+                <div class="error-state">
+                    <h3>⚠️ Ошибка подключения</h3>
+                    <p>${message}</p>
+                    <p style="margin-top: 16px; font-size: 12px; color: #5f6368;">
+                        Повторная попытка через ${POLLING_INTERVAL / 1000} секунд...
+                    </p>
+                </div>
+            `;
+        }
+
+        // Функция для рендеринга опроса в стиле Google Forms
+        function renderSurvey(questionsData) {
+            clearDOM();
+            const app = document.getElementById('app');
+
+            // Проверяем, что данные валидны
+            if (!questionsData || (Array.isArray(questionsData) && questionsData.length === 0)) {
+                app.innerHTML = `
+                    <div class="error-state">
+                        <h3>📋 Нет доступных вопросов</h3>
+                        <p>В настоящее время нет активных опросов.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            // Если данные - объект с полями title, description, questions
+            let surveyTitle = 'Google Forms Survey';
+            let surveyDescription = '';
+            let questions = [];
+
+            if (Array.isArray(questionsData)) {
+                questions = questionsData;
+            } else if (questionsData.title || questionsData.questions) {
+                surveyTitle = questionsData.title || 'Google Forms Survey';
+                surveyDescription = questionsData.description || '';
+                questions = questionsData.questions || [];
+            } else {
+                questions = questionsData;
+            }
+
+            if (!questions || questions.length === 0) {
+                app.innerHTML = `
+                    <div class="error-state">
+                        <h3>📋 Нет доступных вопросов</h3>
+                        <p>Опрос не содержит вопросов.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            // Создаем форму
+            const formId = 'survey-form-' + Date.now();
+            const form = document.createElement('form');
+            form.id = formId;
+            form.className = 'survey-card';
+
+            // Заголовок
+            const headerDiv = document.createElement('div');
+            headerDiv.className = 'survey-header';
+            headerDiv.innerHTML = `
+                <h1 class="survey-title">${escapeHtml(surveyTitle)}</h1>
+                ${surveyDescription ? `<p class="survey-description">${escapeHtml(surveyDescription)}</p>` : ''}
+            `;
+            form.appendChild(headerDiv);
+
+            // Секция вопросов
+            const questionsDiv = document.createElement('div');
+            questionsDiv.className = 'questions-section';
+
+            questions.forEach((question, index) => {
+                const questionDiv = createQuestionElement(question, index);
+                questionsDiv.appendChild(questionDiv);
+            });
+
+            form.appendChild(questionsDiv);
+
+            // Кнопка отправки
+            const submitBtn = document.createElement('button');
+            submitBtn.type = 'button';
+            submitBtn.className = 'submit-btn';
+            submitBtn.textContent = 'Отправить';
+            submitBtn.onclick = () => handleSubmit(formId);
+            form.appendChild(submitBtn);
+
+            // Контейнер для сообщений
+            const messageDiv = document.createElement('div');
+            messageDiv.id = 'message-container';
+            messageDiv.style.display = 'none';
+            form.appendChild(messageDiv);
+
+            app.appendChild(form);
+        }
+
+        // Создание элемента вопроса в зависимости от типа
+        function createQuestionElement(question, index) {
+            const questionDiv = document.createElement('div');
+            questionDiv.className = 'question-item';
+            questionDiv.dataset.questionId = question.id || index;
+
+            const titleSpan = document.createElement('div');
+            titleSpan.className = 'question-title';
+            titleSpan.innerHTML = `
+                ${escapeHtml(question.text || question.title || `Вопрос ${index + 1}`)}
+                ${question.required ? '<span class="required-badge">*</span>' : ''}
+            `;
+            questionDiv.appendChild(titleSpan);
+
+            const inputName = `question_${question.id || index}`;
+
+            switch (question.type) {
+                case 'text':
+                case 'short':
+                    const input = document.createElement('input');
+                    input.type = 'text';
+                    input.className = 'input-field';
+                    input.name = inputName;
+                    input.placeholder = question.placeholder || 'Ваш ответ';
+                    if (question.required) input.required = true;
+                    questionDiv.appendChild(input);
+                    break;
+
+                case 'textarea':
+                case 'long':
+                case 'paragraph':
+                    const textarea = document.createElement('textarea');
+                    textarea.className = 'input-field';
+                    textarea.name = inputName;
+                    textarea.placeholder = question.placeholder || 'Развернутый ответ';
+                    if (question.required) textarea.required = true;
+                    questionDiv.appendChild(textarea);
+                    break;
+
+                case 'radio':
+                case 'single':
+                case 'multiple_choice':
+                    const radioGroup = document.createElement('div');
+                    radioGroup.className = 'option-group';
+
+                    (question.options || []).forEach((option, optIndex) => {
+                        const optionItem = document.createElement('div');
+                        optionItem.className = 'option-item';
+
+                        const radio = document.createElement('input');
+                        radio.type = 'radio';
+                        radio.name = inputName;
+                        radio.value = option.value || option;
+                        radio.id = `${inputName}_${optIndex}`;
+                        if (question.required && optIndex === 0) radio.required = true;
+
+                        const label = document.createElement('label');
+                        label.htmlFor = `${inputName}_${optIndex}`;
+                        label.textContent = option.label || option;
+
+                        optionItem.appendChild(radio);
+                        optionItem.appendChild(label);
+                        radioGroup.appendChild(optionItem);
+                    });
+
+                    questionDiv.appendChild(radioGroup);
+                    break;
+
+                case 'checkbox':
+                case 'multiple':
+                    const checkboxGroup = document.createElement('div');
+                    checkboxGroup.className = 'option-group';
+
+                    (question.options || []).forEach((option, optIndex) => {
+                        const optionItem = document.createElement('div');
+                        optionItem.className = 'option-item';
+
+                        const checkbox = document.createElement('input');
+                        checkbox.type = 'checkbox';
+                        checkbox.name = inputName + '[]';
+                        checkbox.value = option.value || option;
+                        checkbox.id = `${inputName}_${optIndex}`;
+
+                        const label = document.createElement('label');
+                        label.htmlFor = `${inputName}_${optIndex}`;
+                        label.textContent = option.label || option;
+
+                        optionItem.appendChild(checkbox);
+                        optionItem.appendChild(label);
+                        checkboxGroup.appendChild(optionItem);
+                    });
+
+                    questionDiv.appendChild(checkboxGroup);
+                    break;
+
+                case 'select':
+                case 'dropdown':
+                    const select = document.createElement('select');
+                    select.className = 'select-field';
+                    select.name = inputName;
+                    if (question.required) select.required = true;
+
+                    const defaultOption = document.createElement('option');
+                    defaultOption.value = '';
+                    defaultOption.textContent = 'Выберите вариант';
+                    defaultOption.disabled = true;
+                    defaultOption.selected = true;
+                    select.appendChild(defaultOption);
+
+                    (question.options || []).forEach((option) => {
+                        const opt = document.createElement('option');
+                        opt.value = option.value || option;
+                        opt.textContent = option.label || option;
+                        select.appendChild(opt);
+                    });
+
+                    questionDiv.appendChild(select);
+                    break;
+
+                default:
+                    // По умолчанию - текстовое поле
+                    const defaultInput = document.createElement('input');
+                    defaultInput.type = 'text';
+                    defaultInput.className = 'input-field';
+                    defaultInput.name = inputName;
+                    defaultInput.placeholder = 'Ваш ответ';
+                    if (question.required) defaultInput.required = true;
+                    questionDiv.appendChild(defaultInput);
+            }
+
+            return questionDiv;
+        }
+
+        // Обработка отправки формы
+        function handleSubmit(formId) {
+            const form = document.getElementById(formId);
+            if (!form) return;
+
+            const messageContainer = document.getElementById('message-container');
+            if (!messageContainer) return;
+
+            // Собираем данные
+            const formData = new FormData(form);
+            const answers = {};
+
+            for (let [key, value] of formData.entries()) {
+                if (answers[key]) {
+                    if (!Array.isArray(answers[key])) {
+                        answers[key] = [answers[key]];
+                    }
+                    answers[key].push(value);
+                } else {
+                    answers[key] = value;
+                }
+            }
+
+            // Проверяем required поля
+            let isValid = true;
+            const requiredFields = form.querySelectorAll('[required]');
+            requiredFields.forEach(field => {
+                if (field.type === 'radio') {
+                    const radioGroup = form.querySelectorAll(`input[name="${field.name}"]`);
+                    const isChecked = Array.from(radioGroup).some(radio => radio.checked);
+                    if (!isChecked) {
+                        isValid = false;
+                        showMessage('Пожалуйста, заполните все обязательные поля', 'error');
+                    }
+                } else if (field.type === 'checkbox' && field.required) {
+                    const checkboxGroup = form.querySelectorAll(`input[name="${field.name}"]`);
+                    const isChecked = Array.from(checkboxGroup).some(cb => cb.checked);
+                    if (!isChecked) {
+                        isValid = false;
+                        showMessage('Пожалуйста, заполните все обязательные поля', 'error');
+                    }
+                } else if (field.value.trim() === '') {
+                    isValid = false;
+                    showMessage('Пожалуйста, заполните все обязательные поля', 'error');
+                }
+            });
+
+            if (!isValid) return;
+
+            // Имитация отправки
+            try {
+        const response = fetch('/submit', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(answers)
+        });
+
+
+    } catch (error) {
+        console.error('Ошибка при отправке:', error);
+    }
+            showMessage('Спасибо! Ваш ответ сохранен.', 'success');
+
+
+
+        }
+
+        // Показ сообщения
+        function showMessage(text, type) {
+            const messageContainer = document.getElementById('message-container');
+            if (!messageContainer) return;
+
+            messageContainer.style.display = 'block';
+            messageContainer.className = `message ${type}`;
+            messageContainer.textContent = text;
+
+            setTimeout(() => {
+                if (messageContainer) {
+                    messageContainer.style.display = 'none';
+                }
+            }, 3000);
+        }
+
+        // Функция для экранирования HTML
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Функция запроса к API
+        async function fetchQuestions() {
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+                const response = await fetch(API_ENDPOINT, {
+                    signal: controller.signal,
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                });
+
+                clearTimeout(timeoutId);
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                return { success: true, data };
+
+            } catch (error) {
+                console.error('Ошибка запроса:', error);
+
+                if (error.name === 'AbortError') {
+                    return { success: false, error: 'Превышено время ожидания' };
+                }
+
+                return { success: false, error: error.message };
+            }
+        }
+
+        // Основная функция обновления
+        async function updateSurvey() {
+            console.log('Проверка обновлений...');
+
+            const result = await fetchQuestions();
+
+            if (!result.success) {
+                // При ошибке подключения очищаем DOM и показываем ошибку
+                showError(`Не удалось подключиться: ${result.error || 'неизвестная ошибка'}`);
+                currentQuestionsHash = null;
+                return;
+            }
+
+            const newQuestionsHash = getQuestionsHash(result.data);
+
+            // Если вопросы изменились или это первый запуск
+            if (currentQuestionsHash !== newQuestionsHash) {
+                console.log('Вопросы обновлены! Перерисовка страницы...');
+                currentQuestionsHash = newQuestionsHash;
+                renderSurvey(result.data);
+            } else {
+                console.log('Вопросы не изменились');
+            }
+        }
+
+        // Запуск периодического опроса
+        function startPolling() {
+            // Первый немедленный запрос
+            updateSurvey();
+
+            // Очищаем предыдущий таймер если есть
+            if (pollingTimer) {
+                clearInterval(pollingTimer);
+            }
+
+            // Запускаем новый интервал
+            pollingTimer = setInterval(() => {
+                updateSurvey();
+            }, POLLING_INTERVAL);
+        }
+
+        // Инициализация приложения
+        function ini() {
+            console.log('Инициализация Google Forms стиль опроса');
+            console.log(`API Endpoint: ${API_ENDPOINT}`);
+            console.log(`Интервал опроса: ${POLLING_INTERVAL / 1000} секунд`);
+
+            // Показываем загрузку
+            showLoading();
+
+            // Запускаем опрос
+            startPolling();
+        }
+
+        // Запускаем приложение
+        ini();
+    </script>
+</body>
+</html>
